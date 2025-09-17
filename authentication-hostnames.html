@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>API Endpoint and AAD Scope Hosts for Data Plane SDKs</title>
+  <style>
+    body { font-family: Arial, sans-serif; line-height: 1.6; margin: 2rem; }
+    h1, h2 { color: #0072C6; }
+    table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
+    th, td { border: 1px solid #ccc; padding: 0.5rem; text-align: left; vertical-align: top; }
+    th { background: #f2f2f2; }
+    code { background: #f7f7f7; padding: 0.1rem 0.2rem; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <h1>API Endpoint and AAD Scope Hosts for Data Plane SDKs</h1>
+  <p>This page reviews how each Azure data-plane SDK listed in <code>dpa/scope.md</code> determines (1) the API endpoint host that client requests target and (2) the Microsoft Entra ID scope host used when requesting access tokens in the Azure public cloud.</p>
+
+  <h2>Azure Storage (Blobs, Queues, File Shares)</h2>
+  <ul>
+    <li><strong>API endpoint host.</strong> Parsing a storage connection string composes service endpoints such as <code>https://{account}.blob.core.windows.net</code> by combining the account name with service-specific hostname prefixes (<code>blob</code>, <code>queue</code>, <code>file</code>) and the default suffix <code>core.windows.net</code>, with the option to substitute a user-specified suffix or shared access signature when present.【F:sdk/storage/Azure.Storage.Common/src/Shared/StorageConnectionString.cs†L830-L905】【F:sdk/storage/Azure.Storage.Common/src/Shared/StorageConnectionString.cs†L995-L1027】【F:sdk/storage/Azure.Storage.Common/src/Shared/Constants.cs†L160-L178】</li>
+    <li><strong>AAD scope host.</strong> Token credentials default to the shared <code>https://storage.azure.com/.default</code> scope, while <code>BlobAudience</code>, <code>QueueAudience</code>, and <code>ShareAudience</code> build resource-specific hosts (for example, <code>https://{account}.blob.core.windows.net/</code>) before appending <code>/.default</code>; challenge responses can override the host by returning a <code>resource_id</code> that the policy converts into the requested scope.【F:sdk/storage/Azure.Storage.Common/src/Shared/StorageClientOptions.cs†L21-L99】【F:sdk/storage/Azure.Storage.Blobs/src/Models/BlobAudience.cs†L33-L84】【F:sdk/storage/Azure.Storage.Common/src/Shared/StorageBearerTokenChallengeAuthorizationPolicy.cs†L103-L125】</li>
+  </ul>
+
+  <h2>Azure Data Tables</h2>
+  <ul>
+    <li><strong>API endpoint host.</strong> Table connection strings reuse the storage URI builder to emit primary and secondary hosts such as <code>https://{account}.table.core.windows.net</code>, swapping in custom suffixes or SAS tokens as needed. Premium (Cosmos DB-backed) accounts are detected by checking for <code>table.cosmos.azure.com</code> (or its legacy form), allowing the client to preserve that host when forming requests.【F:sdk/tables/Azure.Data.Tables/src/TableConnectionString.cs†L480-L528】【F:sdk/tables/Azure.Data.Tables/src/TableServiceClient.cs†L250-L291】【F:sdk/tables/Azure.Data.Tables/src/TableServiceClient.cs†L979-L984】</li>
+    <li><strong>AAD scope host.</strong> The service selects an audience from <code>TableAudience</code> (defaulting to the storage resource) and calls <code>GetDefaultScope</code>, which appends <code>/.default</code> and flips to Cosmos-specific hosts when premium endpoints are detected. During a bearer challenge, the policy keeps the configured scopes while updating the tenant from the <code>authorization_uri</code> parameter.【F:sdk/tables/Azure.Data.Tables/src/TableServiceClient.cs†L272-L281】【F:sdk/tables/Azure.Data.Tables/src/TableAudience.cs†L66-L86】【F:sdk/tables/Azure.Data.Tables/src/TableBearerTokenChallengeAuthorizationPolicy.cs†L60-L83】</li>
+  </ul>
+
+  <h2>Azure Data App Configuration</h2>
+  <ul>
+    <li><strong>API endpoint host.</strong> Client construction stores the App Configuration endpoint parsed from the connection string (or provided directly) and reuses it for every request, so the API host mirrors the store’s DNS name.【F:sdk/appconfiguration/Azure.Data.AppConfiguration/src/ConfigurationClient.cs†L114-L148】【F:sdk/appconfiguration/Azure.Data.AppConfiguration/src/ConfigurationClient_private.cs†L37-L63】</li>
+    <li><strong>AAD scope host.</strong> <code>ConfigurationClientOptions.GetDefaultScope</code> inspects the endpoint host suffix to choose the correct audience (<code>appconfig.azure.com</code> for the public cloud) before adding <code>/.default</code>, while <code>AppConfigurationAudience</code> supplies the canonical host values for each cloud.【F:sdk/appconfiguration/Azure.Data.AppConfiguration/src/ConfigurationClientOptions.cs†L73-L89】【F:sdk/appconfiguration/Azure.Data.AppConfiguration/src/AppConfigurationAudience.cs†L10-L57】</li>
+  </ul>
+
+  <h2>Azure Key Vault (Secrets, Keys, Certificates, Administration)</h2>
+  <ul>
+    <li><strong>API endpoint host.</strong> Key Vault clients capture the <code>vaultUri</code> supplied at construction and feed it into <code>KeyVaultPipeline</code>, which issues requests against that authority and exposes it via <code>VaultUri</code>. This host typically takes the form <code>{vault-name}.vault.azure.net</code> in the public cloud.【F:sdk/keyvault/Azure.Security.KeyVault.Keys/src/KeyClient.cs†L40-L82】【F:sdk/keyvault/Azure.Security.KeyVault.Shared/src/KeyVaultPipeline.cs†L17-L59】</li>
+    <li><strong>AAD scope host.</strong> <code>ChallengeBasedAuthenticationPolicy</code> waits for a 401 challenge, extracts the <code>resource</code> or <code>scope</code> value (e.g., <code>https://vault.azure.net</code>), appends <code>/.default</code> when necessary, and validates that the host matches the requested vault domain before caching the scope with the tenant identifier.【F:sdk/keyvault/Azure.Security.KeyVault.Shared/src/ChallengeBasedAuthenticationPolicy.cs†L111-L178】</li>
+  </ul>
+
+  <h2>Azure Messaging Service Bus</h2>
+  <ul>
+    <li><strong>API endpoint host.</strong> <code>ServiceBusConnection</code> derives the fully qualified namespace from the connection string’s endpoint host (for example, <code>contoso.servicebus.windows.net</code>) and exposes the HTTPS service endpoint built from that namespace; SAS helpers normalize the namespace with an <code>https</code> scheme when constructing resource URIs.【F:sdk/servicebus/Azure.Messaging.ServiceBus/src/Primitives/ServiceBusConnection.cs†L23-L123】【F:sdk/servicebus/Azure.Messaging.ServiceBus/src/Administration/ServiceBusAdministrationClient.cs†L2703-L2734】</li>
+    <li><strong>AAD scope host.</strong> All token credentials rely on the constant <code>https://servicebus.azure.net/.default</code> scope, and <code>ServiceBusTokenCredential</code> exposes helpers that request tokens using that default audience.【F:sdk/servicebus/Azure.Messaging.ServiceBus/src/Constants.cs†L40-L52】【F:sdk/servicebus/Azure.Messaging.ServiceBus/src/Authorization/ServiceBusTokenCredential.cs†L16-L88】</li>
+  </ul>
+
+  <h2>Azure Messaging Event Hubs</h2>
+  <ul>
+    <li><strong>API endpoint host.</strong> The connection parses the namespace endpoint from the connection string, captures its host as the fully qualified namespace, and retains the full endpoint (including custom emulators) for routing requests.【F:sdk/eventhub/Azure.Messaging.EventHubs/src/EventHubConnection.cs†L158-L210】【F:sdk/eventhub/Azure.Messaging.EventHubs/src/EventHubsConnectionStringProperties.cs†L47-L68】</li>
+    <li><strong>AAD scope host.</strong> <code>EventHubTokenCredential</code> fixes the default scope host at <code>https://eventhubs.azure.net</code>, adding <code>/.default</code> when issuing token requests on behalf of user-supplied credentials.【F:sdk/eventhub/Azure.Messaging.EventHubs.Shared/src/Authorization/EventHubTokenCredential.cs†L16-L85】</li>
+  </ul>
+
+  <h2>Azure Messaging Event Grid</h2>
+  <ul>
+    <li><strong>API endpoint host.</strong> <code>EventGridPublisherClient</code> keeps the topic endpoint supplied by the caller (for example, <code>https://topic.region.eventgrid.azure.net</code>) in a URI builder and reuses that host for all publish requests.【F:sdk/eventgrid/Azure.Messaging.EventGrid/src/EventGridPublisherClient.cs†L29-L85】</li>
+    <li><strong>AAD scope host.</strong> When token credentials are used, the client configures <code>BearerTokenAuthenticationPolicy</code> with the fixed audience <code>https://eventgrid.azure.net/.default</code> so Entra ID tokens always target the global Event Grid resource.【F:sdk/eventgrid/Azure.Messaging.EventGrid/src/EventGridPublisherClient.cs†L53-L67】</li>
+  </ul>
+
+  <h2>Summary Table</h2>
+  <table>
+    <thead>
+      <tr><th>SDK</th><th>API endpoint host construction</th><th>Entra ID scope host</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Azure Storage (Blobs/Queues/Files)</td>
+        <td>Formats <code>https://{account}.{service}.core.windows.net</code> (or user-specified suffix) from the connection string for each service endpoint.【F:sdk/storage/Azure.Storage.Common/src/Shared/StorageConnectionString.cs†L830-L905】【F:sdk/storage/Azure.Storage.Common/src/Shared/StorageConnectionString.cs†L995-L1027】</td>
+        <td>Defaults to <code>https://storage.azure.com/.default</code>, with service/account audiences adding <code>/.default</code>; challenges may supply a resource host that replaces the audience.【F:sdk/storage/Azure.Storage.Common/src/Shared/StorageClientOptions.cs†L21-L99】【F:sdk/storage/Azure.Storage.Blobs/src/Models/BlobAudience.cs†L33-L84】【F:sdk/storage/Azure.Storage.Common/src/Shared/StorageBearerTokenChallengeAuthorizationPolicy.cs†L103-L125】</td>
+      </tr>
+      <tr>
+        <td>Azure Data Tables</td>
+        <td>Builds table endpoints like <code>https://{account}.table.core.windows.net</code> (or Cosmos variants) from the connection string and preserves premium hosts.【F:sdk/tables/Azure.Data.Tables/src/TableConnectionString.cs†L480-L528】【F:sdk/tables/Azure.Data.Tables/src/TableServiceClient.cs†L250-L291】【F:sdk/tables/Azure.Data.Tables/src/TableServiceClient.cs†L979-L984】</td>
+        <td>Chooses a storage or Cosmos audience via <code>TableAudience</code> and appends <code>/.default</code>, keeping that scope through challenge flows.【F:sdk/tables/Azure.Data.Tables/src/TableServiceClient.cs†L272-L281】【F:sdk/tables/Azure.Data.Tables/src/TableAudience.cs†L66-L86】【F:sdk/tables/Azure.Data.Tables/src/TableBearerTokenChallengeAuthorizationPolicy.cs†L60-L83】</td>
+      </tr>
+      <tr>
+        <td>Azure Data App Configuration</td>
+        <td>Uses the store endpoint parsed from the connection string (or provided URI) for all requests.【F:sdk/appconfiguration/Azure.Data.AppConfiguration/src/ConfigurationClient.cs†L114-L148】【F:sdk/appconfiguration/Azure.Data.AppConfiguration/src/ConfigurationClient_private.cs†L37-L63】</td>
+        <td>Infers the correct <code>appconfig</code> audience from the endpoint suffix and appends <code>/.default</code> (unless an explicit audience is set).【F:sdk/appconfiguration/Azure.Data.AppConfiguration/src/ConfigurationClientOptions.cs†L73-L89】【F:sdk/appconfiguration/Azure.Data.AppConfiguration/src/AppConfigurationAudience.cs†L10-L57】</td>
+      </tr>
+      <tr>
+        <td>Azure Key Vault</td>
+        <td>Sends requests to the provided <code>vaultUri</code>, stored in <code>KeyVaultPipeline</code> and exposed as <code>VaultUri</code> (e.g., <code>{vault}.vault.azure.net</code>).【F:sdk/keyvault/Azure.Security.KeyVault.Keys/src/KeyClient.cs†L40-L82】【F:sdk/keyvault/Azure.Security.KeyVault.Shared/src/KeyVaultPipeline.cs†L17-L59】</td>
+        <td>Extracts the challenge’s <code>resource</code>/<code>scope</code>, enforces host alignment with the vault domain, and uses the resulting host plus <code>/.default</code> for token acquisition.【F:sdk/keyvault/Azure.Security.KeyVault.Shared/src/ChallengeBasedAuthenticationPolicy.cs†L111-L178】</td>
+      </tr>
+      <tr>
+        <td>Azure Messaging Service Bus</td>
+        <td>Reads the namespace host from the connection string and exposes the HTTPS service endpoint; helper methods normalize the namespace for SAS signatures.【F:sdk/servicebus/Azure.Messaging.ServiceBus/src/Primitives/ServiceBusConnection.cs†L23-L123】【F:sdk/servicebus/Azure.Messaging.ServiceBus/src/Administration/ServiceBusAdministrationClient.cs†L2703-L2734】</td>
+        <td>Requests tokens for <code>https://servicebus.azure.net/.default</code> by default via <code>ServiceBusTokenCredential</code>.【F:sdk/servicebus/Azure.Messaging.ServiceBus/src/Constants.cs†L40-L52】【F:sdk/servicebus/Azure.Messaging.ServiceBus/src/Authorization/ServiceBusTokenCredential.cs†L16-L88】</td>
+      </tr>
+      <tr>
+        <td>Azure Messaging Event Hubs</td>
+        <td>Captures the namespace endpoint and host from the connection string, supporting emulator endpoints when configured.【F:sdk/eventhub/Azure.Messaging.EventHubs/src/EventHubConnection.cs†L158-L210】【F:sdk/eventhub/Azure.Messaging.EventHubs/src/EventHubsConnectionStringProperties.cs†L47-L68】</td>
+        <td>Uses the fixed audience <code>https://eventhubs.azure.net/.default</code> for token credentials.【F:sdk/eventhub/Azure.Messaging.EventHubs.Shared/src/Authorization/EventHubTokenCredential.cs†L16-L85】</td>
+      </tr>
+      <tr>
+        <td>Azure Messaging Event Grid</td>
+        <td>Reuses the caller-supplied topic endpoint when issuing publish requests.【F:sdk/eventgrid/Azure.Messaging.EventGrid/src/EventGridPublisherClient.cs†L29-L85】</td>
+        <td>Configures Entra ID requests for <code>https://eventgrid.azure.net/.default</code>.【F:sdk/eventgrid/Azure.Messaging.EventGrid/src/EventGridPublisherClient.cs†L53-L67】</td>
+      </tr>
+    </tbody>
+  </table>
+</body>
+</html>
